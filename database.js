@@ -70,7 +70,15 @@ async function initMysql() {
         price INT NOT NULL,
         description TEXT,
         price_tiers TEXT,
+        seller_price INT DEFAULT NULL,
         custom_emoji_id VARCHAR(255) DEFAULT NULL
+      )
+    `);
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS sellers (
+        user_id VARCHAR(50) PRIMARY KEY,
+        name VARCHAR(255) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
     await connection.query(`
@@ -134,9 +142,11 @@ async function initMysql() {
     try { await connection.query(`ALTER TABLE categories ADD COLUMN custom_emoji_id VARCHAR(255) DEFAULT NULL`); } catch (_) {}
     try { await connection.query(`ALTER TABLE products ADD COLUMN category_id INT DEFAULT 0`); } catch (_) {}
     try { await connection.query(`ALTER TABLE products ADD COLUMN custom_emoji_id VARCHAR(255) DEFAULT NULL`); } catch (_) {}
+    try { await connection.query(`ALTER TABLE products ADD COLUMN seller_price INT DEFAULT NULL`); } catch (_) {}
     try { await connection.query(`ALTER TABLE users ADD COLUMN balance BIGINT DEFAULT 0`); } catch (_) {}
     try { await connection.query(`ALTER TABLE users ADD COLUMN spins INT DEFAULT 0`); } catch (_) {}
     try { await connection.query(`ALTER TABLE users ADD COLUMN lang VARCHAR(10) DEFAULT 'vi'`); } catch (_) {}
+    try { await connection.query(`ALTER TABLE users ADD COLUMN verified TINYINT DEFAULT 0`); await connection.query(`UPDATE users SET verified = 1`); } catch (_) {}
     try { await connection.query(`ALTER TABLE orders ADD COLUMN delivered_data TEXT`); } catch (_) {}
     try { await connection.query(`ALTER TABLE blacklist ADD COLUMN reason TEXT`); } catch (_) {}
   } finally {
@@ -166,7 +176,13 @@ function initSqlite() {
       price INTEGER NOT NULL,
       description TEXT,
       price_tiers TEXT,
+      seller_price INTEGER DEFAULT NULL,
       custom_emoji_id TEXT DEFAULT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sellers (
+      user_id TEXT PRIMARY KEY,
+      name TEXT DEFAULT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS stock (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,9 +235,11 @@ function initSqlite() {
   try { sqliteDb.exec(`ALTER TABLE categories ADD COLUMN custom_emoji_id TEXT DEFAULT NULL;`); } catch (_) {}
   try { sqliteDb.exec(`ALTER TABLE products ADD COLUMN category_id INTEGER DEFAULT 0;`); } catch (_) {}
   try { sqliteDb.exec(`ALTER TABLE products ADD COLUMN custom_emoji_id TEXT DEFAULT NULL;`); } catch (_) {}
+  try { sqliteDb.exec(`ALTER TABLE products ADD COLUMN seller_price INTEGER DEFAULT NULL;`); } catch (_) {}
   try { sqliteDb.exec(`ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0;`); } catch (_) {}
   try { sqliteDb.exec(`ALTER TABLE users ADD COLUMN spins INTEGER DEFAULT 0;`); } catch (_) {}
   try { sqliteDb.exec(`ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'vi';`); } catch (_) {}
+  try { sqliteDb.exec(`ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0;`); sqliteDb.exec(`UPDATE users SET verified = 1;`); } catch (_) {}
   try { sqliteDb.exec(`ALTER TABLE orders ADD COLUMN delivered_data TEXT;`); } catch (_) {}
   try { sqliteDb.exec(`ALTER TABLE blacklist ADD COLUMN reason TEXT;`); } catch (_) {}
 }
@@ -234,7 +252,7 @@ async function initDB() {
     try {
       await initMysql();
       mode = 'mysql';
-      console.log('📦 Database: MySQL');
+      console.log('Ã°ÂÂÂ¦ Database: MySQL');
       return;
     } catch (err) {
       if (onlyMysql) throw err;
@@ -244,7 +262,7 @@ async function initDB() {
 
   initSqlite();
   mode = 'sqlite';
-  console.log('📦 Database: SQLite');
+  console.log('Ã°ÂÂÂ¦ Database: SQLite');
 }
 
 function parsePriceTiersJson(raw) {
@@ -261,32 +279,54 @@ function parsePriceTiersJson(raw) {
   }
 }
 
-function effectiveUnitPrice(product, quantity) {
-  const base = Number(product.price) || 0;
+function hasSellerPrice(product) {
+  if (!product) return false;
+  const sp = product.seller_price;
+  if (sp === null || sp === undefined || sp === '') return false;
+  const n = Number(sp);
+  return Number.isFinite(n) && n >= 0;
+}
+
+/**
+ * LÃ¡ÂºÂ¥y giÃÂ¡ nÃ¡Â»Ân ÃÂ¡p dÃ¡Â»Â¥ng cho ngÃÂ°Ã¡Â»Âi ÃÂang mua.
+ * - KhÃÂ¡ch thÃÂ°Ã¡Â»Âng  -> product.price
+ * - Seller        -> product.seller_price (nÃ¡ÂºÂ¿u ÃÂÃÂ£ cÃÂ i), chÃÂ°a cÃÂ i thÃÂ¬ rÃÂ¡i vÃ¡Â»Â giÃÂ¡ thÃÂ°Ã¡Â»Âng
+ */
+function getBaseUnitPrice(product, isSeller = false) {
+  if (isSeller && hasSellerPrice(product)) return Number(product.seller_price);
+  return Number(product.price) || 0;
+}
+
+function effectiveUnitPrice(product, quantity, isSeller = false) {
+  const base = getBaseUnitPrice(product, isSeller);
   const qty = Math.max(0, parseInt(quantity, 10) || 0);
   const tiers = product.price_tiers;
   if (!tiers?.length || qty < 1) return base;
   const sorted = [...tiers].sort((a, b) => b.min - a.min);
   for (const t of sorted) {
-    if (qty >= t.min) return t.price;
+    if (qty >= t.min) {
+      // Seller ÃÂÃÂ£ cÃÂ³ giÃÂ¡ riÃÂªng: chÃ¡Â»Â ÃÂn giÃÂ¡ sÃ¡Â»Â khi nÃÂ³ cÃÂ²n rÃ¡ÂºÂ» hÃÂ¡n giÃÂ¡ seller.
+      if (isSeller && Number(t.price) >= base) return base;
+      return Number(t.price);
+    }
   }
   return base;
 }
 
-function calculatePrice(product, quantity) {
-  return effectiveUnitPrice(product, quantity) * (parseInt(quantity, 10) || 0);
+function calculatePrice(product, quantity, isSeller = false) {
+  return effectiveUnitPrice(product, quantity, isSeller) * (parseInt(quantity, 10) || 0);
 }
 
-function getUnitPrice(product, quantity) {
-  return effectiveUnitPrice(product, quantity);
+function getUnitPrice(product, quantity, isSeller = false) {
+  return effectiveUnitPrice(product, quantity, isSeller);
 }
 
-// ========== BLACKLIST (CẤM NGƯỜI DÙNG) ==========
+// ========== BLACKLIST (CÃ¡ÂºÂ¤M NGÃÂ¯Ã¡Â»ÂI DÃÂNG) ==========
 async function getBlacklist() {
   const rows = await queryAll('SELECT user_id, reason FROM blacklist');
   return rows.map(r => ({
     userId: String(r.user_id),
-    reason: r.reason || 'Vi phạm chính sách'
+    reason: r.reason || 'Vi phÃ¡ÂºÂ¡m chÃÂ­nh sÃÂ¡ch'
   }));
 }
 
@@ -353,7 +393,7 @@ async function deleteCategory(id) {
 // ========== PRODUCTS ==========
 async function getAllProducts() {
   const rows = await queryAll(
-    `SELECT p.id, p.category_id, p.name, p.price, p.description, p.price_tiers, p.custom_emoji_id, ${SQL_PRODUCTS_STOCK_SUB} FROM products p`
+    `SELECT p.id, p.category_id, p.name, p.price, p.seller_price, p.description, p.price_tiers, p.custom_emoji_id, ${SQL_PRODUCTS_STOCK_SUB} FROM products p`
   );
   return rows.map((row) => ({
     id: row.id,
@@ -362,6 +402,7 @@ async function getAllProducts() {
     price: row.price,
     description: row.description,
     price_tiers: parsePriceTiersJson(row.price_tiers),
+    seller_price: (row.seller_price === null || row.seller_price === undefined || row.seller_price === '') ? null : parseInt(row.seller_price, 10),
     custom_emoji_id: row.custom_emoji_id || null,
     stock_count: parseInt(row.stock_count, 10) || 0
   }));
@@ -369,7 +410,7 @@ async function getAllProducts() {
 
 async function getProductsByCategory(categoryId) {
   const rows = await queryAll(
-    `SELECT p.id, p.category_id, p.name, p.price, p.description, p.price_tiers, p.custom_emoji_id, ${SQL_PRODUCTS_STOCK_SUB} 
+    `SELECT p.id, p.category_id, p.name, p.price, p.seller_price, p.description, p.price_tiers, p.custom_emoji_id, ${SQL_PRODUCTS_STOCK_SUB} 
      FROM products p WHERE p.category_id = ?`,
     [categoryId]
   );
@@ -380,6 +421,7 @@ async function getProductsByCategory(categoryId) {
     price: row.price,
     description: row.description,
     price_tiers: parsePriceTiersJson(row.price_tiers),
+    seller_price: (row.seller_price === null || row.seller_price === undefined || row.seller_price === '') ? null : parseInt(row.seller_price, 10),
     custom_emoji_id: row.custom_emoji_id || null,
     stock_count: parseInt(row.stock_count, 10) || 0
   }));
@@ -387,7 +429,7 @@ async function getProductsByCategory(categoryId) {
 
 async function getProduct(id) {
   const rows = await queryAll(
-    `SELECT p.id, p.category_id, p.name, p.price, p.description, p.price_tiers, p.custom_emoji_id, ${SQL_PRODUCTS_STOCK_SUB}
+    `SELECT p.id, p.category_id, p.name, p.price, p.seller_price, p.description, p.price_tiers, p.custom_emoji_id, ${SQL_PRODUCTS_STOCK_SUB}
      FROM products p WHERE p.id = ?`,
     [id]
   );
@@ -400,6 +442,7 @@ async function getProduct(id) {
     price: row.price,
     description: row.description,
     price_tiers: parsePriceTiersJson(row.price_tiers),
+    seller_price: (row.seller_price === null || row.seller_price === undefined || row.seller_price === '') ? null : parseInt(row.seller_price, 10),
     custom_emoji_id: row.custom_emoji_id || null,
     stock_count: parseInt(row.stock_count, 10) || 0
   };
@@ -550,6 +593,45 @@ async function updatePriceTiers(id, priceTiers) {
   await queryRun('UPDATE products SET price_tiers = ? WHERE id = ?', [tiersJson, id]);
 }
 
+async function updateSellerPrice(id, price) {
+  const value = (price === null || price === undefined || price === '') ? null : parseInt(price, 10);
+  await queryRun('UPDATE products SET seller_price = ? WHERE id = ?', [Number.isFinite(value) ? value : null, id]);
+}
+
+// ========== SELLER (ÃÂÃ¡ÂºÂ I LÃÂ / CÃ¡Â»ÂNG TÃÂC VIÃÂN) ==========
+async function getAllSellers() {
+  const rows = await queryAll('SELECT user_id, name FROM sellers');
+  return rows.map(r => ({
+    userId: String(r.user_id),
+    name: r.name || null
+  }));
+}
+
+async function getSeller(userId) {
+  const uid = String(userId).trim();
+  const rows = await queryAll('SELECT user_id, name FROM sellers WHERE user_id = ?', [uid]);
+  if (!rows.length) return null;
+  return { userId: String(rows[0].user_id), name: rows[0].name || null };
+}
+
+async function addSeller(userId, name = null) {
+  const uid = String(userId).trim();
+  if (mode === 'mysql') {
+    return await queryRun(
+      'INSERT INTO sellers (user_id, name) VALUES (?, ?) ON DUPLICATE KEY UPDATE name = ?',
+      [uid, name, name]
+    );
+  }
+  return await queryRun(
+    'INSERT INTO sellers (user_id, name) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET name = excluded.name',
+    [uid, name]
+  );
+}
+
+async function removeSeller(userId) {
+  return await queryRun('DELETE FROM sellers WHERE user_id = ?', [String(userId).trim()]);
+}
+
 async function getStockByProduct(productId) {
   const rows = await queryAll('SELECT id, account_data, is_sold, buyer_id FROM stock WHERE product_id = ?', [productId]);
   return rows.map((row) => ({
@@ -638,7 +720,7 @@ async function getTodayRevenue() {
       today_revenue: parseInt(row.today_revenue, 10) || 0
     };
   } catch (e) {
-    console.error('Lỗi tính doanh thu hôm nay:', e.message);
+    console.error('LÃ¡Â»Âi tÃÂ­nh doanh thu hÃÂ´m nay:', e.message);
     return { today_orders: 0, today_revenue: 0 };
   }
 }
@@ -660,9 +742,148 @@ async function getRecentOrders(limit = 20) {
     product_name: row.name,
     total_price: row.total_price,
     quantity: row.quantity || 1,
-    user_name: row.first_name || 'Khách',
+    user_name: row.first_name || 'KhÃÂ¡ch',
     created_at: row.created_at
   }));
+}
+
+
+async function getOrdersCount() {
+  try {
+    const rows = await queryAll('SELECT COUNT(*) AS c FROM orders');
+    return parseInt(rows?.[0]?.c, 10) || 0;
+  } catch (e) {
+    console.error('Lá»i Äáº¿m ÄÆ¡n hÃ ng:', e.message);
+    return 0;
+  }
+}
+
+async function getOrdersPage(offset = 0, limit = 12) {
+  const safeLimit = Math.max(1, Math.min(50, parseInt(limit, 10) || 12));
+  const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+  const rows = await queryAll(
+    `SELECT o.id, o.user_id, o.status, p.name, o.total_price, o.quantity, u.first_name, o.created_at
+     FROM orders o
+     JOIN products p ON o.product_id = p.id
+     LEFT JOIN users u ON o.user_id = u.id
+     ORDER BY o.id DESC
+     LIMIT ${safeLimit} OFFSET ${safeOffset}`
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    user_id: row.user_id,
+    status: row.status,
+    product_name: row.name,
+    total_price: row.total_price,
+    quantity: row.quantity || 1,
+    user_name: row.first_name || 'KhÃ¡ch',
+    created_at: row.created_at
+  }));
+}
+
+/* Doanh thu cá»§a Má»T ngÃ y (UTC+7) */
+async function getRevenueForDay(dayStr) {
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(dayStr || '')) ? String(dayStr) : null;
+  if (!day) return { day: null, orders: 0, revenue: 0 };
+  const start = new Date(day + 'T00:00:00+07:00').getTime();
+  const end = start + 24 * 60 * 60 * 1000;
+  const adminIds = getAdminIds();
+  let adminFilterClause = '';
+  const params = [start, end];
+  if (adminIds.length > 0) {
+    adminFilterClause = ` AND o.user_id NOT IN (${adminIds.map(() => '?').join(',')})`;
+    params.push(...adminIds);
+  }
+  try {
+    const rows = await queryAll(
+      `SELECT COUNT(*) AS c, COALESCE(SUM(o.total_price), 0) AS total
+       FROM orders o
+       WHERE o.status = 'completed' AND o.created_at >= ? AND o.created_at < ?${adminFilterClause}`,
+      params
+    );
+    const row = rows?.[0] || {};
+    return { day, orders: parseInt(row.c, 10) || 0, revenue: parseInt(row.total, 10) || 0 };
+  } catch (e) {
+    console.error('Lá»i doanh thu theo ngÃ y:', e.message);
+    return { day, orders: 0, revenue: 0 };
+  }
+}
+
+/* Doanh thu tá»«ng ngÃ y trong Má»T thÃ¡ng -> [{ day, orders, revenue }] */
+async function getRevenueMonth(monthStr) {
+  const month = /^\d{4}-\d{2}$/.test(String(monthStr || '')) ? String(monthStr) : null;
+  if (!month) return [];
+  const [y, m] = month.split('-').map(Number);
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const start = new Date(month + '-01T00:00:00+07:00').getTime();
+  const end = new Date(`${month}-${String(daysInMonth).padStart(2, '0')}T00:00:00+07:00`).getTime() + 24 * 60 * 60 * 1000;
+  const adminIds = getAdminIds();
+  let adminFilterClause = '';
+  const params = [start, end];
+  if (adminIds.length > 0) {
+    adminFilterClause = ` AND o.user_id NOT IN (${adminIds.map(() => '?').join(',')})`;
+    params.push(...adminIds);
+  }
+  try {
+    const rows = await queryAll(
+      `SELECT o.created_at, o.total_price FROM orders o
+       WHERE o.status = 'completed' AND o.created_at >= ? AND o.created_at < ?${adminFilterClause}`,
+      params
+    );
+    const bucket = new Map();
+    for (const row of rows) {
+      const ts = Number(row.created_at);
+      if (!ts) continue;
+      const d = new Date(ts + 7 * 60 * 60 * 1000);
+      const day = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+      const cur = bucket.get(day) || { day, orders: 0, revenue: 0 };
+      cur.orders += 1;
+      cur.revenue += parseInt(row.total_price, 10) || 0;
+      bucket.set(day, cur);
+    }
+    return Array.from(bucket.values()).sort((a, b) => (a.day < b.day ? -1 : 1));
+  } catch (e) {
+    console.error('Lá»i doanh thu theo thÃ¡ng:', e.message);
+    return [];
+  }
+}
+
+
+/* ---------- XÃ¡c minh ngÆ°á»i dÃ¹ng (captcha láº§n Äáº§u) ---------- */
+async function isUserVerified(userId) {
+  try {
+    const rows = await queryAll('SELECT verified FROM users WHERE id = ?', [userId]);
+    if (!rows || rows.length === 0) return false;
+    return parseInt(rows[0].verified, 10) === 1;
+  } catch (e) {
+    // fail-open: thiáº¿u cá»t / DB lá»i thÃ¬ khÃ´ng ÄÆ°á»£c khoÃ¡ ngÆ°á»i dÃ¹ng
+    return true;
+  }
+}
+
+async function setUserVerified(userId) {
+  /* Upsert: nguoi dung moi co the CHUA co row trong bang users (bam /start
+   * roi giai captcha ngay). UPDATE ... WHERE id = ? se khop 0 dong -> mat
+   * xac minh, user bi hoi captcha lai mai. Phai INSERT ... ON CONFLICT. */
+  try {
+    if (mode === 'mysql') {
+      await queryRun(
+        'INSERT INTO users (id, verified) VALUES (?, 1) ON DUPLICATE KEY UPDATE verified = 1',
+        [userId]
+      );
+    } else {
+      await queryRun(
+        'INSERT INTO users (id, verified) VALUES (?, 1) ON CONFLICT(id) DO UPDATE SET verified = 1',
+        [userId]
+      );
+    }
+    return true;
+  } catch (e) {
+    /* Bang chua co cot verified (migration loi) -> thu UPDATE, khong chan user */
+    try { await queryRun('UPDATE users SET verified = 1 WHERE id = ?', [userId]); return true; } catch (_) {}
+    console.error('Loi luu xac minh:', e.message);
+    return false;
+  }
 }
 
 async function keepAlive() {
@@ -670,7 +891,7 @@ async function keepAlive() {
     if (mode === 'mysql') await pool.query('SELECT 1');
     else if (sqliteDb) sqliteDb.prepare('SELECT 1').get();
   } catch (error) {
-    console.error('❌ Database keep-alive failed:', error.message);
+    console.error('Ã¢ÂÂ Database keep-alive failed:', error.message);
   }
 }
 
@@ -762,7 +983,7 @@ async function getUserDepositStats(userId) {
   return { totalDeposit, monthDeposit };
 }
 
-// Hỗ trợ cộng dồn doanh số khi mua trực tiếp (ví hoặc QR) vào top tháng
+// HÃ¡Â»Â trÃ¡Â»Â£ cÃ¡Â»Âng dÃ¡Â»Ân doanh sÃ¡Â»Â khi mua trÃ¡Â»Â±c tiÃ¡ÂºÂ¿p (vÃÂ­ hoÃ¡ÂºÂ·c QR) vÃÂ o top thÃÂ¡ng
 async function addDepositOrSpend(userId, amount) {
   const addAmount = parseInt(amount, 10) || 0;
   if (addAmount <= 0) return;
@@ -773,7 +994,7 @@ async function addDepositOrSpend(userId, amount) {
   );
 }
 
-// Tự động reset theo tháng hiện tại (lọc từ ngày 1 hàng tháng, loại trừ Admin)
+// TÃ¡Â»Â± ÃÂÃ¡Â»Âng reset theo thÃÂ¡ng hiÃ¡Â»Ân tÃ¡ÂºÂ¡i (lÃ¡Â»Âc tÃ¡Â»Â« ngÃÂ y 1 hÃÂ ng thÃÂ¡ng, loÃ¡ÂºÂ¡i trÃ¡Â»Â« Admin)
 async function getTopDeposits(limit = 10) {
   const safeLimit = Math.max(1, parseInt(limit, 10) || 10);
   const now = new Date();
@@ -801,7 +1022,7 @@ async function getTopDeposits(limit = 10) {
 
   return rows.map((r) => ({
     id: r.id,
-    name: r.first_name || 'Khách',
+    name: r.first_name || 'KhÃÂ¡ch',
     username: r.username || '',
     total: parseInt(r.total_deposited, 10) || 0
   }));
@@ -832,14 +1053,26 @@ module.exports = {
   getOrdersByUser,
   getPendingOrders,
   saveUser,
+  isUserVerified,
+  setUserVerified,
   getAllUsers,
   updateProduct,
   updatePriceTiers,
+  updateSellerPrice,
+  getAllSellers,
+  getSeller,
+  addSeller,
+  removeSeller,
+  getBaseUnitPrice,
   getStockByProduct,
   getOrderHistory,
   getRevenue,
   getTodayRevenue,
   getRecentOrders,
+  getOrdersCount,
+  getOrdersPage,
+  getRevenueForDay,
+  getRevenueMonth,
   keepAlive,
   calculatePrice,
   getUnitPrice,
